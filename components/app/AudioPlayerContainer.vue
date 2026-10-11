@@ -1,6 +1,17 @@
 <template>
   <div>
-    <app-audio-player ref="audioPlayer" :bookmarks="bookmarks" :sleep-timer-running="isSleepTimerRunning" :sleep-time-remaining="sleepTimeRemaining" :serverLibraryItemId="serverLibraryItemId" @selectPlaybackSpeed="showPlaybackSpeedModal = true" @updateTime="(t) => (currentTime = t)" @showSleepTimer="showSleepTimer" @showBookmarks="showBookmarks" />
+    <app-audio-player
+      ref="audioPlayer"
+      :bookmarks="bookmarks"
+      :sleep-timer-running="isSleepTimerRunning"
+      :sleep-time-remaining="sleepTimeRemaining"
+      :serverLibraryItemId="serverLibraryItemId"
+      @selectPlaybackSpeed="showPlaybackSpeedModal = true"
+      @updateTime="(t) => (currentTime = t)"
+      @userSeek="reportListenTogetherAction('seek', $event)"
+      @showSleepTimer="showSleepTimer"
+      @showBookmarks="showBookmarks"
+    />
 
     <modals-playback-speed-modal v-model="showPlaybackSpeedModal" :playback-rate.sync="playbackSpeed" @update:playbackRate="updatePlaybackSpeed" @change="changePlaybackSpeed" />
     <modals-sleep-timer-modal v-model="showSleepTimerModal" :current-time="sleepTimeRemaining" :sleep-timer-running="isSleepTimerRunning" :current-end-of-chapter-time="currentEndOfChapterTime" :is-auto="isAutoSleepTimer" @change="selectSleepTimeout" @cancel="cancelSleepTimer" @increase="increaseSleepTimer" @decrease="decreaseSleepTimer" />
@@ -34,6 +45,9 @@ export default {
       onSleepTimerEndedListener: null,
       onSleepTimerSetListener: null,
       onMediaPlayerChangedListener: null,
+      onPlayingUpdateListener: null,
+      listenTogetherExpectedPlaying: null,
+      listenTogetherExpectedPlayingAt: 0,
       sleepInterval: null,
       currentEndOfChapterTime: 0,
       serverLibraryItemId: null,
@@ -53,6 +67,11 @@ export default {
       return this.$store.state.currentPlaybackSession
     }
   },
+  watch: {
+    currentPlaybackSession(newSession, oldSession) {
+      this.checkListenTogetherSession(newSession, oldSession)
+    }
+  },
   methods: {
     showBookmarks() {
       this.showBookmarksModal = true
@@ -62,7 +81,7 @@ export default {
       if (!bookmark || isNaN(bookmark.time)) return
       const bookmarkTime = Number(bookmark.time)
       if (this.$refs.audioPlayer) {
-        this.$refs.audioPlayer.seek(bookmarkTime)
+        this.$refs.audioPlayer.userSeek(bookmarkTime)
       }
     },
     onSleepTimerEnded({ value: currentPosition }) {
@@ -139,6 +158,7 @@ export default {
         console.log(`[AudioPlayerContainer] Update Playback Speed: ${speed}`)
         this.$refs.audioPlayer.setPlaybackSpeed(speed)
       }
+      this.reportListenTogetherAction('rate')
     },
     changePlaybackSpeed(speed) {
       console.log(`[AudioPlayerContainer] Change Playback Speed: ${speed}`)
@@ -230,6 +250,7 @@ export default {
         if (startTime !== undefined && startTime !== null) {
           // seek to start time
           AbsAudioPlayer.seek({ value: startTime })
+          this.reportListenTogetherAction('seek', Number(startTime))
         } else if (this.$refs.audioPlayer) {
           this.$refs.audioPlayer.play()
         }
@@ -283,6 +304,100 @@ export default {
     onLocalMediaProgressUpdate(localMediaProgress) {
       console.log('Got local media progress update', localMediaProgress.progress, JSON.stringify(localMediaProgress))
       this.$store.commit('globals/updateLocalMediaProgress', localMediaProgress)
+    },
+    /**
+     * Listening party session handling
+     * Reports item changes to the party and leaves the party when the player is closed
+     */
+    checkListenTogetherSession(newSession, oldSession) {
+      if (!this.$listenTogether.isInParty) return
+      if (!newSession) {
+        if (oldSession) this.$listenTogether.leave()
+        return
+      }
+      if (newSession.id === oldSession?.id || this.$listenTogether.isLoadingItem) return
+      if (!newSession.libraryItemId) {
+        // Media that is only on this device can't be played in a listening party
+        this.$listenTogether.leave()
+        this.$toast.info(this.$strings.ToastListenTogetherEnded)
+        return
+      }
+      if (!this.$listenTogether.isPartyItem(newSession.libraryItemId, newSession.episodeId)) {
+        this.$listenTogether.localAction('load', {
+          libraryItemId: newSession.libraryItemId,
+          episodeId: newSession.episodeId || null,
+          currentTime: newSession.currentTime || 0,
+          isPlaying: true
+        })
+      }
+    },
+    async getListenTogetherState() {
+      const audioPlayer = this.$refs.audioPlayer
+      const session = this.currentPlaybackSession
+      let currentTime = audioPlayer?.currentTime || 0
+      if (audioPlayer?.isPlaying) {
+        const data = await AbsAudioPlayer.getCurrentTime().catch(() => null)
+        if (data && !isNaN(data.value)) currentTime = Number(data.value)
+      }
+      return {
+        libraryItemId: session?.libraryItemId || null,
+        episodeId: session?.episodeId || null,
+        currentTime,
+        duration: audioPlayer?.totalDuration || 0,
+        isPlaying: !!audioPlayer?.isPlaying,
+        isLoading: !session || !audioPlayer || audioPlayer.showLoadingState || audioPlayer.seekLoading,
+        playbackRate: audioPlayer?.currentPlaybackRate || this.playbackSpeed || 1
+      }
+    },
+    /**
+     * Send a user initiated playback change to the listening party
+     *
+     * @param {'play'|'pause'|'seek'|'rate'} action
+     * @param {number} [currentTime]
+     */
+    async reportListenTogetherAction(action, currentTime) {
+      if (!this.$listenTogether.isInParty) return
+      const state = await this.getListenTogetherState()
+      if (!state.libraryItemId) return
+      this.$listenTogether.localAction(action, {
+        libraryItemId: state.libraryItemId,
+        episodeId: state.episodeId,
+        currentTime: currentTime !== undefined ? currentTime : state.currentTime,
+        playbackRate: state.playbackRate
+      })
+    },
+    setListenTogetherExpectedPlaying(isPlaying) {
+      this.listenTogetherExpectedPlaying = isPlaying
+      this.listenTogetherExpectedPlayingAt = Date.now()
+    },
+    onPlayingUpdate(data) {
+      // Play/pause can come from the app, notification, lock screen, headphones or the sleep timer
+      const isPlaying = !!data.value
+      const expected = this.listenTogetherExpectedPlaying
+      this.listenTogetherExpectedPlaying = null
+      if (expected === isPlaying && Date.now() - this.listenTogetherExpectedPlayingAt < 5000) {
+        // Change applied from the listening party
+        return
+      }
+      this.reportListenTogetherAction(isPlaying ? 'play' : 'pause')
+    },
+    async loadListenTogetherItem({ libraryItemId, episodeId, startTime, paused }) {
+      const payload = { libraryItemId, episodeId, startTime, paused, fromListenTogether: true }
+
+      // Prefer a downloaded copy of the item
+      const localLibraryItem = await this.$db.getLocalLibraryItemByLId(libraryItemId).catch(() => null)
+      if (localLibraryItem) {
+        const localEpisode = episodeId ? localLibraryItem.media.episodes?.find((ep) => ep.serverEpisodeId === episodeId) : null
+        if (!episodeId || localEpisode) {
+          payload.libraryItemId = localLibraryItem.id
+          payload.episodeId = localEpisode?.id || null
+          payload.serverLibraryItemId = libraryItemId
+          payload.serverEpisodeId = episodeId
+        }
+      }
+
+      if (!paused) this.setListenTogetherExpectedPlaying(true)
+      await this.playLibraryItem(payload)
     },
     onMediaPlayerChanged(data) {
       this.$store.commit('setMediaPlayer', data.value)
@@ -435,11 +550,39 @@ export default {
       }
     }
   },
+  created() {
+    // Player interface used by listen together to apply changes from the listening party
+    this.listenTogetherPlayer = {
+      getState: () => this.getListenTogetherState(),
+      play: () => {
+        this.setListenTogetherExpectedPlaying(true)
+        AbsAudioPlayer.playPlayer()
+      },
+      pause: () => {
+        this.setListenTogetherExpectedPlaying(false)
+        AbsAudioPlayer.pausePlayer()
+      },
+      seek: (time) => {
+        AbsAudioPlayer.seek({ value: time })
+        if (this.$refs.audioPlayer) {
+          this.$refs.audioPlayer.currentTime = time
+          this.$refs.audioPlayer.timeupdate()
+        }
+      },
+      setPlaybackRate: (playbackRate) => {
+        this.playbackSpeed = playbackRate
+        if (this.$refs.audioPlayer) this.$refs.audioPlayer.setPlaybackSpeed(playbackRate)
+      },
+      loadItem: (payload) => this.loadListenTogetherItem(payload)
+    }
+    this.$listenTogether.attachPlayer(this.listenTogetherPlayer)
+  },
   async mounted() {
     this.onLocalMediaProgressUpdateListener = await AbsAudioPlayer.addListener('onLocalMediaProgressUpdate', this.onLocalMediaProgressUpdate)
     this.onSleepTimerEndedListener = await AbsAudioPlayer.addListener('onSleepTimerEnded', this.onSleepTimerEnded)
     this.onSleepTimerSetListener = await AbsAudioPlayer.addListener('onSleepTimerSet', this.onSleepTimerSet)
     this.onMediaPlayerChangedListener = await AbsAudioPlayer.addListener('onMediaPlayerChanged', this.onMediaPlayerChanged)
+    this.onPlayingUpdateListener = await AbsAudioPlayer.addListener('onPlayingUpdate', this.onPlayingUpdate)
 
     this.playbackSpeed = this.$store.getters['user/getUserSetting']('playbackRate')
     console.log(`[AudioPlayerContainer] Init Playback Speed: ${this.playbackSpeed}`)
@@ -459,6 +602,8 @@ export default {
     this.onSleepTimerEndedListener?.remove()
     this.onSleepTimerSetListener?.remove()
     this.onMediaPlayerChangedListener?.remove()
+    this.onPlayingUpdateListener?.remove()
+    this.$listenTogether.detachPlayer(this.listenTogetherPlayer)
 
     this.$eventBus.$off('abs-ui-ready', this.onReady)
     this.$eventBus.$off('play-item', this.playLibraryItem)

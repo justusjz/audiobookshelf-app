@@ -56,6 +56,11 @@ class ServerSocket extends EventEmitter {
     this.socket.on('user_updated', this.onUserUpdated.bind(this))
     this.socket.on('user_item_progress_updated', this.onUserItemProgressUpdated.bind(this))
     this.socket.on('playlist_added', this.onPlaylistAdded.bind(this))
+    // Listen together events are handled in the listenTogether plugin
+    const listenTogetherEvents = ['listen_together_state', 'listen_together_party', 'listen_together_ended', 'listen_together_invite']
+    listenTogetherEvents.forEach((evt) => {
+      this.socket.on(evt, (data) => this.emit(evt, data))
+    })
     this.socket.io.on('reconnect_attempt', this.onReconnectAttempt.bind(this))
     this.socket.io.on('reconnect_error', this.onReconnectError.bind(this))
     this.socket.io.on('reconnect_failed', this.onReconnectFailed.bind(this))
@@ -105,8 +110,8 @@ class ServerSocket extends EventEmitter {
 
   onInit(data) {
     console.log('[SOCKET] Initial socket data received', data)
-    this.emit('initialized', true)
     this.isAuthenticated = true
+    this.emit('initialized', true)
   }
 
   onAuthFailed(data) {

@@ -220,6 +220,11 @@ export default {
       items.push(
         ...[
           {
+            text: this.listeningParty ? `${this.$strings.LabelListenTogether} (${this.listeningParty.code})` : this.$strings.LabelListenTogether,
+            value: 'listen_together',
+            icon: 'groups'
+          },
+          {
             text: this.$strings.LabelTotalTrack,
             value: 'total_track',
             icon: this.playerSettings.useTotalTrack ? 'check_box' : 'check_box_outline_blank'
@@ -248,6 +253,9 @@ export default {
       )
 
       return items
+    },
+    listeningParty() {
+      return this.$store.state.listenTogether.party
     },
     jumpForwardLabel() {
       return this.getJumpLabel(this.jumpForwardTime)
@@ -450,7 +458,7 @@ export default {
     },
     async selectChapter(chapter) {
       await this.$hapticsImpact()
-      this.seek(chapter.start)
+      this.userSeek(chapter.start)
       this.showChapterModal = false
     },
     async castClick() {
@@ -482,7 +490,7 @@ export default {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
       if (!this.nextChapter) return
-      this.seek(this.nextChapter.start)
+      this.userSeek(this.nextChapter.start)
     },
     async jumpChapterStart() {
       await this.$hapticsImpact()
@@ -496,10 +504,10 @@ export default {
         const currChapterIndex = this.chapters.findIndex((ch) => Number(ch.start) <= this.currentTime && Number(ch.end) >= this.currentTime)
         if (currChapterIndex > 0) {
           const prevChapter = this.chapters[currChapterIndex - 1]
-          this.seek(prevChapter.start)
+          this.userSeek(prevChapter.start)
         }
       } else {
-        this.seek(this.currentChapter.start)
+        this.userSeek(this.currentChapter.start)
       }
     },
     showSleepTimerModal() {
@@ -512,17 +520,26 @@ export default {
       AbsAudioPlayer.setPlaybackSpeed({ value: speed })
     },
     restart() {
-      this.seek(0)
+      this.userSeek(0)
     },
     async jumpBackwards() {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
+      const currentTime = await this.getCurrentTimeForJump()
       AbsAudioPlayer.seekBackward({ value: this.jumpBackwardsTime })
+      this.$emit('userSeek', Math.max(0, currentTime - this.jumpBackwardsTime))
     },
     async jumpForward() {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
+      const currentTime = await this.getCurrentTimeForJump()
       AbsAudioPlayer.seekForward({ value: this.jumpForwardTime })
+      this.$emit('userSeek', Math.min(this.totalDuration || Infinity, currentTime + this.jumpForwardTime))
+    },
+    async getCurrentTimeForJump() {
+      if (!this.$store.state.listenTogether.party) return this.currentTime
+      const data = await AbsAudioPlayer.getCurrentTime().catch(() => null)
+      return data && !isNaN(data.value) ? Number(data.value) : this.currentTime
     },
     setStreamReady() {
       this.readyTrackWidth = this.trackWidth
@@ -630,11 +647,15 @@ export default {
         if (this.$refs.totalBufferedTrack) this.$refs.totalBufferedTrack.style.width = totalBufferedPercent * 100 + '%'
       }
     },
+    /**
+     * @param {number} time
+     * @returns {boolean} false if the seek was not performed
+     */
     seek(time) {
-      if (this.showLoadingState) return
+      if (this.showLoadingState) return false
       if (this.seekLoading) {
         console.error('Already seek loading', this.seekedTime)
-        return
+        return false
       }
 
       this.seekedTime = time
@@ -649,6 +670,17 @@ export default {
 
         this.$refs.playedTrack.classList.remove('bg-gray-200')
         this.$refs.playedTrack.classList.add('bg-yellow-300')
+      }
+      return true
+    },
+    /**
+     * Seek initiated by the user (reported to the listening party)
+     *
+     * @param {number} time
+     */
+    userSeek(time) {
+      if (this.seek(time)) {
+        this.$emit('userSeek', time)
       }
     },
     async touchstartCursor(e) {
@@ -723,7 +755,7 @@ export default {
 
       if (this.isDraggingCursor) {
         if (this.draggingCurrentTime !== this.currentTime) {
-          this.seek(this.draggingCurrentTime)
+          this.userSeek(this.draggingCurrentTime)
         }
         this.isDraggingCursor = false
       } else {
@@ -794,6 +826,8 @@ export default {
           this.updateReadyTrack()
           this.updateUseChapterTrack()
           this.savePlayerSettings()
+        } else if (action === 'listen_together') {
+          this.$store.commit('listenTogether/setShowModal', true)
         } else if (action === 'close') {
           this.closePlayback()
         }

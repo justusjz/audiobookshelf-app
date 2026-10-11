@@ -140,6 +140,12 @@ export default {
 
       if (this.serverConnectionConfig) {
         items.push({
+          icon: 'groups',
+          text: this.$strings.LabelListenTogether,
+          action: 'listenTogether'
+        })
+
+        items.push({
           icon: 'language',
           text: this.$strings.ButtonGoToWebClient,
           action: 'openWebClient'
@@ -164,6 +170,9 @@ export default {
       if (action === 'logout') {
         await this.logout()
         this.$router.push('/connect')
+      } else if (action === 'listenTogether') {
+        this.show = false
+        this.$store.commit('listenTogether/setShowModal', true)
       } else if (action === 'openWebClient') {
         this.show = false
         let path = `/library/${this.$store.state.libraries.currentLibraryId}`
